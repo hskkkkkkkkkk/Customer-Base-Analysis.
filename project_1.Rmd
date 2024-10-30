@@ -1,0 +1,583 @@
+---
+title: "Project 1 - Customer Base Analysis"
+subtitle: "Group 6 - 1340"
+author: "(Bulat Rygzynov, Daniil Li, Juyoung Kim)"
+output:
+  html_document:
+    df_print: paged
+date: "2024-10-30"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "D:/Working directory R/DS SBWL/ADS (IV)/Project1")
+```
+
+Customer_id = unique customer id
+Age = customer's age
+Gender = 0: Male, 1: Female
+Revenue_Total = total sales by customer
+N_Purchases = number of purchases to date
+Purchase_DATE = date latest purchase, dd.mm.yy
+Purchase_VALUE = latest purchase in €
+Pay_Method = 0: Digital Wallets, 1: Card, 2: PayPal, 3: Other
+Time_Spent = time spent (in sec) on website
+Browser = 0: Chrome, 1: Safari, 2: Edge, 3: Other
+Newsletter = 0: not subscribed, 1: subscribed
+Voucher = 0: not used, 1: used
+
+Pre-processing
+```{r}
+shop_sales <- read.csv("shop_sales.csv")
+library(ranger)
+library(MASS)
+library(readr)
+library(randomForest)
+library(ggplot2)
+library(dplyr)
+library(cluster)
+library(scales)
+library(reshape2)
+```
+
+```{r}
+head(shop_sales)
+```
+
+```{r}
+cat("Dimensions of the dataset:", dim(shop_sales), "\n")
+```
+
+```{r}
+cat("Variable names:", names(shop_sales), "\n")
+```
+
+```{r}
+str(shop_sales)
+```
+
+```{r}
+shop_sales_clean <- shop_sales
+shop_sales_clean$CGender <- as.factor(shop_sales_clean$Gender)
+shop_sales_clean$CPurchase_DATE <- as.Date(shop_sales_clean$Purchase_DATE, format="%d.%m.%y")
+shop_sales_clean$CPay_Method <- as.factor(shop_sales_clean$Pay_Method)
+shop_sales_clean$CBrowser <- as.factor(shop_sales_clean$Browser)
+shop_sales_clean$CNewsletter <- as.factor(shop_sales_clean$Newsletter)
+shop_sales_clean$CVoucher <- as.factor(shop_sales_clean$Voucher)
+str(shop_sales_clean)
+```
+
+```{r}
+cat("Missing values per column:\n", capture.output(colSums(is.na(shop_sales_clean))), sep="\n")
+```
+
+```{r}
+# Summary statistics for numerical variables
+num_vars <- c("Age", "Revenue_Total", "N_Purchases", "Purchase_VALUE", "Time_Spent")
+cat("\nSummary statistics for numerical variables:\n", 
+    capture.output(summary(shop_sales_clean[num_vars])), 
+    sep="\n")
+```
+
+```{r}
+# Frequency tables for categorical variables
+cat("\nFrequency tables for categorical variables:\n",
+    "\nGender:", capture.output(table(shop_sales_clean$Gender)),
+    "\nPay_Method:", capture.output(table(shop_sales_clean$Pay_Method)),
+    "\nBrowser:", capture.output(table(shop_sales_clean$Browser)),
+    "\nNewsletter:", capture.output(table(shop_sales_clean$Newsletter)),
+    "\nVoucher:", capture.output(table(shop_sales_clean$Voucher)),
+    sep="\n")
+```
+
+```{r}
+# Correlation matrix for numerical variables
+cor_matrix <- cor(shop_sales_clean[num_vars], use = "complete.obs")
+cat("\nCorrelation matrix for numerical variables:\n",
+    capture.output(cor_matrix), 
+    sep="\n")
+```
+
+```{r}
+# Cor heatmap
+melted_cor <- melt(cor_matrix)
+ggplot(data = melted_cor, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  labs(title = "Correlation Heatmap") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Correlation") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 10, hjust = 1))+
+  coord_fixed()
+```
+
+```{r}
+# Create age bins
+shop_sales_clean$AgeBins <- cut(shop_sales_clean$Age,
+                                breaks = c(0, 25, 45, Inf),
+                                labels = c("< 25", "25-45", "> 45"),
+                                right = FALSE)
+str(shop_sales_clean$AgeBins)
+```
+
+```{r}
+# Check for duplicates
+duplicates_specific <- shop_sales[duplicated(shop_sales), ]
+print(duplicates_specific)
+```
+
+```{r}
+# Group-wise summary statistics (dplyr)
+## By Gender
+gender_summary <- shop_sales_clean %>%
+  group_by(CGender) %>%
+  summarise(
+    Count = n(),
+    Avg_Age = mean(Age, na.rm = TRUE),
+    Avg_Revenue = mean(Revenue_Total, na.rm = TRUE),
+    Avg_Purchases = mean(N_Purchases, na.rm = TRUE),
+    Avg_Purchase_Value = mean(Purchase_VALUE, na.rm = TRUE),
+    Avg_Time_Spent = mean(Time_Spent, na.rm = TRUE)
+  )
+cat("\nSummary statistics by Gender:\n",
+    capture.output(gender_summary),
+    sep="\n")
+```
+
+```{r}
+## By Newsletter Subscription
+newsletter_summary <- shop_sales_clean %>%
+  group_by(CNewsletter) %>%
+  summarise(
+    Count = n(),
+    Avg_Revenue = mean(Revenue_Total, na.rm = TRUE),
+    Avg_Purchases = mean(N_Purchases, na.rm = TRUE),
+    Avg_Purchase_Value = mean(Purchase_VALUE, na.rm = TRUE)
+  )
+
+newsletter_summary
+```
+
+Visualization
+
+```{r}
+library(gridExtra)
+# PLOTS
+# Histograms for numerical variables
+## Age distribution
+p1 <- ggplot(shop_sales_clean, aes(x = Age)) +
+  geom_histogram(binwidth = 3, fill = "#00a000", color = "#000000") +
+  ggtitle("Age Distribution") +
+  labs(x = "Age", y = "Frequency") +
+  scale_x_continuous(n.breaks = 10) +
+  scale_y_continuous(n.breaks = 10) +
+  theme_bw()
+
+## Revenue_Total distribution
+p2 <- ggplot(shop_sales_clean, aes(x = Revenue_Total)) +
+  geom_histogram(binwidth = 2, fill = "#0000aa", color = "#000000") +
+  ggtitle("Total Sales by Customer Distribution") +
+  labs(x = "Total Sales by Customer (€)", y = "Frequency") +
+  scale_x_continuous(n.breaks = 20) +
+  scale_y_continuous(n.breaks = 10) +
+  theme_bw()
+
+## Number of Purchases distribution
+p3 <- ggplot(shop_sales_clean, aes(x = N_Purchases)) +
+  geom_histogram(binwidth = 1, fill = "#E69F00", color = "#000000") +
+  ggtitle("Number of Purchases Distribution") +
+  labs(x = "Number of Purchases", y = "Frequency") +
+  scale_x_continuous(n.breaks = 10) +
+  scale_y_continuous(n.breaks = 10) +
+  theme_bw()
+
+## Time Spent on Website
+p4 <- ggplot(shop_sales_clean, aes(x = Time_Spent)) +
+  geom_histogram(fill = "#CC79A7", color = "#000000") +
+  ggtitle("Time Spent on Website") +
+  labs(x = "Time Spent (seconds)", y = "Frequency") +
+  scale_x_continuous(n.breaks = 10) +
+  scale_y_continuous(n.breaks = 10) +
+  theme_bw()
+
+#Arranging all plots in one figure
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+```
+
+Bar charts for categorical variables
+
+```{r}
+library(patchwork)
+## Gender distribution
+b1 <- ggplot(shop_sales_clean, aes(x = CGender)) +
+  geom_bar(fill = "#00a000") +
+  labs(title = "Gender Distribution", x = "Gender", y = "Count") +
+  scale_x_discrete(labels = c("0" = "Male", "1" = "Female")) +
+  scale_y_continuous(n.breaks = 10) +
+  theme_bw()
+
+## Payment Method distribution
+b2 <- ggplot(shop_sales_clean, aes(x = CPay_Method)) +
+  geom_bar(fill = "#0000aa") +
+  labs(title = "Payment Method Distribution", x = "Payment Method", y = "Count") +
+  scale_x_discrete(labels = c("0" = "Digital Wallets", "1" = "Card", "2" = "PayPal", "3" = "Other")) +
+  scale_y_continuous(n.breaks = 10) +
+  theme_bw()
+
+## Browser usage
+b3 <- ggplot(shop_sales_clean, aes(x = CBrowser)) +
+  geom_bar(fill = "#E69F00") +
+  labs(title = "Browser Usage", x = "Browser", y = "Count") +
+  scale_x_discrete(labels = c("0" = "Chrome", "1" = "Safari", "2" = "Edge", "3" = "Other")) +
+  scale_y_continuous(n.breaks = 10) +
+  theme_bw()
+
+## Newsletter Subscription
+b4 <- ggplot(shop_sales_clean, aes(x = CNewsletter)) +
+  geom_bar(fill = "#CC79A7") +
+  labs(title = "Newsletter Subscription Status", x = "Subscription Status", y = "Count") +
+  scale_x_discrete(labels = c("0" = "Not Subscribed", "1" = "Subscribed")) +
+  scale_y_continuous(n.breaks = 10) +
+  theme_bw()
+
+## Voucher Usage
+b5 <- ggplot(shop_sales_clean, aes(x = CVoucher)) +
+  geom_bar(fill = "#D55E00") +
+  labs(title = "Voucher Usage", x = "Voucher Usage", y = "Count") +
+  scale_x_discrete(labels = c("0" = "Not Used", "1" = "Used")) +
+  scale_y_continuous(n.breaks = 10) +
+  theme_bw()
+
+empty_plot <- ggplot() + 
+  theme_void()
+layout <- (b1 | b2 | b3) /
+  (empty_plot | b4 | b5 | empty_plot)
+layout
+```
+
+Boxplots to identify outliers in numerical variables
+
+```{r}
+## Age boxplot
+box1<-ggplot(shop_sales_clean, aes(y = Age)) +
+    geom_boxplot(fill = "#0000aa") +
+    labs(title = "Boxplot of Age", y = "Age") +
+    scale_y_continuous(n.breaks = 10) +
+    theme(aspect.ratio = 2/1)
+
+## Revenue_Total boxplot
+box2<-ggplot(shop_sales_clean, aes(y = Revenue_Total)) +
+    geom_boxplot(fill = "#CC79A7") +
+    labs(title = "Boxplot of Total Sales by Customer", y = "Total Sales by Customer (€)") +
+    scale_y_continuous(n.breaks = 20) +
+    theme(aspect.ratio = 2/1)
+
+grid.arrange(box1, box2, ncol = 2)
+```
+MODELS
+
+```{r}
+set.seed(111)
+ind <- sample(2, nrow(shop_sales_clean), replace = TRUE, prob = c(0.7, 0.3))
+train <- shop_sales_clean[ind==1,]
+test <- shop_sales_clean[ind==2,]
+```
+
+```{r}
+#logistic regression
+model_newsletter_full <- glm(CNewsletter ~ Age + CGender + Revenue_Total + N_Purchases + CPurchase_DATE + 
+                               Purchase_VALUE + CPay_Method + Time_Spent + CBrowser + CVoucher, 
+                             family = binomial(link = "logit"), data = train)
+summary(model_newsletter_full)
+```
+
+```{r}
+stepwise_model <- step(model_newsletter_full, direction="both")  
+summary(stepwise_model)
+#NO SIGNIFICANT VARIABLES
+```
+
+```{r}
+# Random Forest model
+rf_newspaper <- randomForest(CNewsletter ~ Age + CGender + Revenue_Total + N_Purchases + 
+                               CPurchase_DATE + Purchase_VALUE + CPay_Method + Time_Spent + 
+                               CBrowser + CVoucher, 
+                             data = train, 
+                             ntree = 100)
+print(rf_newspaper)
+```
+
+```{r}
+#random forest, different package
+ranger_newspaper <- ranger(
+  CNewsletter ~ Age + CGender + Revenue_Total + N_Purchases + 
+    CPurchase_DATE + Purchase_VALUE + CPay_Method + Time_Spent + 
+    CBrowser + CVoucher, 
+  data = train, 
+  num.trees = 500,
+  importance = "permutation")
+
+print(ranger_newspaper)
+
+plot(as.table(ranger_newspaper$variable.importance), ylab = "Importance", las = 2, 
+     cex.axis = 0.6, ylim = c(0,.5))
+```
+
+
+Now let's try to predict continuous variable (Purchase_VALUE)
+we will build 2 models and compare them
+
+```{r}
+#feature Engineering
+shop_sales_clean$Avg_Purchase_Value <- shop_sales_clean$Revenue_Total / shop_sales_clean$N_Purchases
+
+#removing unnecessary columns 
+data_model <- shop_sales_clean %>% 
+  dplyr::select(-Customer_id, -Purchase_DATE, -CPurchase_DATE, -Gender, -Pay_Method, 
+         -Browser, -Newsletter, -Voucher, -AgeBins)
+
+str(data_model)
+```
+Model building
+```{r}
+set.seed(213)
+ind_1 <- sample(2, nrow(data_model), replace = TRUE, prob = c(0.7, 0.3))
+train_1 <- data_model[ind_1==1,]
+test_1 <- data_model[ind_1==2,]
+```
+```{r}
+# Define the formula
+formula <- Purchase_VALUE ~ .
+```
+
+Linear Regression Model
+
+```{r}
+#build the linear regression model
+lm_model <- lm(formula, data = train_1)
+summary(lm_model)
+```
+```{r}
+stepwise_lm <- stepAIC(lm_model, direction = "both")
+summary(stepwise_lm)
+```
+
+Random Forest Model
+
+```{r}
+# Build the random forest model
+set.seed(4321)
+rf_model <- ranger(
+  formula, 
+  data = train_1, 
+  num.trees = 500, 
+  importance = "permutation")
+
+print(rf_model)
+```
+
+```{r}
+plot(as.table(rf_model$variable.importance), ylab = "Importance", las = 2, cex.axis = 0.6)
+```
+
+Models Evaluation
+
+```{r}
+# Function to calculate evaluation metrics
+evaluate_model <- function(model, test_data, target_variable) {
+  if (inherits(model, "ranger")) {
+    predictions <- predict(model, data = test_data)$predictions
+  } else {
+    predictions <- predict(model, newdata = test_data)
+  }
+  observations <- test_data[[target_variable]]
+  
+  # Calculate RMSE
+  rmse <- sqrt(mean((predictions - observations)^2))
+  
+  return(list(RMSE = rmse))
+}
+```
+
+```{r}
+lm_eval <- evaluate_model(stepwise_lm, test_1, "Purchase_VALUE")
+rf_eval <- evaluate_model(rf_model, test_1, "Purchase_VALUE")
+results<-data.frame(
+  Model = c("Linear Regression", "Random Forest"),
+  RMSE = c(lm_eval$RMSE, rf_eval$RMSE)
+)
+print(results)
+
+#RMSE (Root Mean Squared Error) is a standard way to measure the error of a model 
+#in predicting quantitative data. It represents the square root of the second sample moment 
+#of the differences between predicted values and observed values or the quadratic mean of 
+#these differences. 
+#Essentially, RMSE tells you how concentrated the data is around the line of best fit.
+#Lower RMSE values indicate a better fit of the model to the data. 
+#It shows that the errors between the predicted values and the actual values are smaller on average.
+```
+
+CROSS VALIDATION
+
+```{r}
+
+set.seed(1234)
+data_model <- shop_sales_clean
+n <- nrow(data_model)
+fold <- 10
+
+#create folds
+#create a vector indicating fold membership for each observation
+folds <- sample(rep(1:fold, length.out = n))
+rmse_list <- list()#list to store rmse
+
+```
+
+
+```{r}
+#cross-validation
+for (i in seq_len(fold)) {
+  #getting test and training indices
+  test_indices <- which(folds == i)
+  train_indices <- setdiff(seq_len(n), test_indices)
+  
+  #split
+  train_data <- data_model[train_indices, ]
+  test_data <- data_model[test_indices, ]
+  
+  #build models on the training data
+  rf <- ranger(Purchase_VALUE ~ ., data = train_data, num.trees = 500)
+  lin <- lm(formula(stepwise_lm), data = train_data)
+  
+  #predictions on the test data
+  rf_pred <- predict(rf, data = test_data)$predictions
+  lin_pred <- predict(lin, newdata = test_data)
+  
+  #calculate RMSE for each model
+  obs <- test_data$Purchase_VALUE
+  rmse_rf <- sqrt(mean((obs - rf_pred)^2))
+  rmse_lin <- sqrt(mean((obs - lin_pred)^2))
+  rmse_list[[i]] <- c(Random_Forest = rmse_rf, Linear_Regression = rmse_lin)
+}
+```
+
+```{r}
+rmse_df <- do.call(rbind, rmse_list)
+rmse_df <- as.data.frame(rmse_df)
+print(rmse_df)
+mean_rmse <- colMeans(rmse_df)
+print(mean_rmse)
+```
+```{r}
+rmse_melted <- melt(rmse_df, variable.name = "Model", value.name = "RMSE")
+ggplot(rmse_melted, aes(x = Model, y = RMSE, fill = Model)) +
+  geom_boxplot() +
+  labs(title = "Cross-validated RMSE comparison",
+       x = "Model",
+       y = "RMSE") +
+  theme_bw()
+```
+
+Customer Segmentation. Clustering
+
+```{r}
+# We select Customer_id, Revenue_total, N_purchases, CPurchase_DATE
+clustering_data <- data_model[, c(1, 4, 5, 14) ]
+
+clustering_data$MON <- rescale(clustering_data$Revenue_Total, to = c(0,1))
+clustering_data$FRE <- rescale(clustering_data$N_Purchases, to = c(0,1))
+
+reference_date <- as.Date("2021-01-01")
+transaction_date <- clustering_data$CPurchase_DATE
+clustering_data <- clustering_data %>%
+  mutate(recency = as.numeric(difftime(transaction_date, reference_date, units="days")))
+head(clustering_data$recency)
+
+clustering_data$REC <- rescale(clustering_data$recency, to =c(0,1))
+
+rfm <- clustering_data[, c(5, 6, 8)] # We select only MON, FRE, REC variables
+```                      
+                       
+```{r}
+library(dplyr)
+library(ggplot2)
+
+#  We define the maximum number of clusters to test
+n_clusters <- 10
+wss <- numeric(n_clusters)
+set.seed(42)
+# We loop over a range of cluster numbers (from 1 to n_clusters)
+for (i in 1:n_clusters) {
+  km_rfm <- kmeans(rfm, centers = i, nstart = 20)
+  wss[i] <- km_rfm$tot.withinss
+}
+
+# Now we plot the within-cluster sum of squares to determine the optimal number of clusters
+plot(1:n_clusters, wss, type = "b", pch = 19, frame = FALSE,
+     xlab = "Number of Clusters (k)",
+     ylab = "Total Within-Cluster Sum of Squares (WSS)",
+     main = "Elbow Method for Determining Optimal Number of Clusters")
+```
+
+```{r}
+library(tibble)
+# We create a tibble to store cluster numbers and WSS values
+wss_df <- tibble(clusters = 1:n_clusters, wss = wss)
+
+scree_plot <- ggplot(wss_df, aes(x = clusters, y = wss, group = 1)) + 
+  geom_point(size = 4) +  
+  geom_line() +  
+  scale_x_continuous(breaks = c(2, 4, 6, 8, 10)) +  
+  xlab("Number of clusters") + 
+  ylab("Within-Cluster Sum of Squares (WSS)") +
+  ggtitle("Scree Plot for Determining Optimal Number of Clusters")
+
+# Display the basic scree plot
+scree_plot
+
+# Add a horizontal dashed line at each WSS value, with the 4th line in red
+scree_plot <- scree_plot +  
+  geom_hline(yintercept = wss,    
+             linetype = "dashed",     
+             color = c(rep("#000000", 3), "#FF0000", rep("#000000", 6)))
+
+# Display the scree plot with horizontal lines
+scree_plot
+```
+
+The plot suggested that we should choose 4 clusters, but as we moved forward it showed that the optimal amount of clusters was 5. 
+
+```{r}
+km_rfm2 <- kmeans(rfm, centers = 5, nstart = 20)
+clustering_data$cluster <- km_rfm2$cluster
+```
+```{r}
+library(scatterplot3d)
+scatterplot3d(clustering_data[,c(5,6,8)], pch=20, color=rainbow(4)[clustering_data$cluster])
+```
+```{r}
+library(rgl)
+plot3d(clustering_data[,c(5,6,8)], col=rainbow(5)[clustering_data$cluster])
+```
+
+```{r}
+clustering_data$cluster <- as.factor(clustering_data$cluster)
+```
+```{r}
+for (c in 1:5) {
+  segment <- clustering_data %>% filter(cluster == c)
+  print(paste("--------- CLUSTER", c, "---------"))
+  print(summary(segment))
+}
+```
+
+```{r}
+library(randomForest)
+library("rpart")
+library("rpart.plot")
+```
+
+```{r}
+rf <- rpart(cluster ~ Revenue_Total + N_Purchases + recency, data=clustering_data)
+rpart.plot(rf)
+```
